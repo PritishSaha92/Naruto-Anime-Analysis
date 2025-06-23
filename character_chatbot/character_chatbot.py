@@ -1,6 +1,7 @@
 import pandas as pd
 import torch
 import re
+import os
 import huggingface_hub
 from datasets import Dataset
 import transformers
@@ -31,7 +32,15 @@ class CharacterChatBot():
         self.huggingface_token = huggingface_token
         self.base_model_path = "meta-llama/Meta-Llama-3-8B-Instruct"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.use_quantization = torch.cuda.is_available()  # Only use quantization if CUDA is available
+        
+        # Check if quantization should be disabled via environment variable
+        disable_quantization = os.environ.get("DISABLE_QUANTIZATION", "0") == "1"
+        disable_triton = os.environ.get("DISABLE_TRITON", "0") == "1"
+        
+        # Only use quantization if CUDA is available and not explicitly disabled
+        self.use_quantization = (torch.cuda.is_available() and 
+                                not disable_quantization and 
+                                self._check_bitsandbytes_compatibility())
 
         if self.huggingface_token is not None:
             huggingface_hub.login(self.huggingface_token)
@@ -43,6 +52,23 @@ class CharacterChatBot():
             train_dataset = self.load_data()
             self.train(self.base_model_path, train_dataset)
             self.model = self.load_model(self.model_path)
+    
+    def _check_bitsandbytes_compatibility(self):
+        """Check if bitsandbytes is properly installed and compatible"""
+        try:
+            import bitsandbytes as bnb
+            # Try to access a basic function to ensure it's working
+            bnb.functional.dequantize_4bit
+            return True
+        except ImportError:
+            print("⚠️  bitsandbytes not available")
+            return False
+        except AttributeError:
+            print("⚠️  bitsandbytes version incompatible")
+            return False
+        except Exception as e:
+            print(f"⚠️  bitsandbytes compatibility issue: {e}")
+            return False
     
     def chat(self, message, history):
         messages = []
@@ -133,11 +159,18 @@ class CharacterChatBot():
                                                              quantization_config= bnb_config,
                                                              trust_remote_code=True)
             except Exception as e:
-                print(f"Quantization failed during training: {e}. Training without quantization.")
+                print(f"Quantization failed during training: {e}. Training without quantization and hanging.")
                 self.use_quantization = False
+                # Force garbage collection to free memory
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                print("Loading model without quantization...")
                 model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path,
                                                              trust_remote_code=True,
-                                                             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32)
+                                                             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                                                             device_map="auto" if torch.cuda.is_available() else None)
         else:
             model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path,
                                                          trust_remote_code=True,
