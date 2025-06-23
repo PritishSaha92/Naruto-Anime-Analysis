@@ -2,7 +2,7 @@ from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
 import evaluate
 
-metric = evaluate.load('accuracy')
+metric = evaluate.load('evaluate-metric/accuracy')
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
     predictions = np.argmax(logits, axis=-1)
