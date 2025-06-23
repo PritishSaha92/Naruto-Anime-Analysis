@@ -5,13 +5,20 @@ import huggingface_hub
 from datasets import Dataset
 import transformers
 from transformers import (
-    BitsAndBytesConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
 )
 from peft import LoraConfig, PeftModel
 from trl import SFTConfig, SFTTrainer
 import gc
+
+# Conditional import for BitsAndBytesConfig
+try:
+    from transformers import BitsAndBytesConfig
+    QUANTIZATION_AVAILABLE = True
+except ImportError:
+    QUANTIZATION_AVAILABLE = False
+    print("Warning: BitsAndBytesConfig not available. Quantization will be disabled.")
 
 # Remove actions from transcript
 def remove_paranthesis(text):
@@ -20,9 +27,30 @@ def remove_paranthesis(text):
 
 class CharacterChatBot():
 
+    def _check_quantization_availability(self):
+        """Check if quantization is available by testing bitsandbytes import"""
+        if not torch.cuda.is_available():
+            return False
+        
+        if not QUANTIZATION_AVAILABLE:
+            return False
+        
+        try:
+            import bitsandbytes as bnb
+            # Test if triton is properly available
+            try:
+                from triton.ops.matmul_perf_model import early_config_prune, estimate_matmul_time
+                return True
+            except ImportError:
+                print("Warning: triton.ops not available. Disabling quantization.")
+                return False
+        except ImportError:
+            print("Warning: bitsandbytes not available. Disabling quantization.")
+            return False
+
     def __init__(self,
                  model_path,
-                 data_path="/kaggle/input/content/data/naruto.csv",
+                 data_path="data/naruto.csv",
                  huggingface_token = None
                  ):
         
@@ -31,7 +59,7 @@ class CharacterChatBot():
         self.huggingface_token = huggingface_token
         self.base_model_path = "meta-llama/Meta-Llama-3-8B-Instruct"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.use_quantization = torch.cuda.is_available()  # Only use quantization if CUDA is available
+        self.use_quantization = self._check_quantization_availability()
 
         if self.huggingface_token is not None:
             huggingface_hub.login(self.huggingface_token)
@@ -74,7 +102,7 @@ class CharacterChatBot():
 
 
     def load_model(self, model_path):
-        if self.use_quantization:
+        if self.use_quantization and QUANTIZATION_AVAILABLE:
             try:
                 bnb_config = BitsAndBytesConfig(
                     load_in_4bit=True,
@@ -120,7 +148,12 @@ class CharacterChatBot():
               lr_scheduler_type = "constant",
               ):
         
-        if self.use_quantization:
+        # Adjust optimizer if quantization is not available
+        if not self.use_quantization and optim == "paged_adamw_32bit":
+            optim = "adamw_torch"
+            print("Switching to adamw_torch optimizer since quantization is not available.")
+        
+        if self.use_quantization and QUANTIZATION_AVAILABLE:
             try:
                 bnb_config = BitsAndBytesConfig(
                     load_in_4bit=True,
@@ -135,6 +168,8 @@ class CharacterChatBot():
             except Exception as e:
                 print(f"Quantization failed during training: {e}. Training without quantization.")
                 self.use_quantization = False
+                if optim == "paged_adamw_32bit":
+                    optim = "adamw_torch"
                 model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path,
                                                              trust_remote_code=True,
                                                              torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32)
@@ -200,7 +235,7 @@ class CharacterChatBot():
         del trainer, model
         gc.collect()
 
-        if self.use_quantization:
+        if self.use_quantization and QUANTIZATION_AVAILABLE:
             try:
                 bnb_config = BitsAndBytesConfig(
                     load_in_4bit=True,
