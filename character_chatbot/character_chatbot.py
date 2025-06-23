@@ -5,20 +5,13 @@ import huggingface_hub
 from datasets import Dataset
 import transformers
 from transformers import (
+    BitsAndBytesConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
 )
 from peft import LoraConfig, PeftModel
 from trl import SFTConfig, SFTTrainer
 import gc
-
-# Conditional import for BitsAndBytesConfig
-try:
-    from transformers import BitsAndBytesConfig
-    QUANTIZATION_AVAILABLE = True
-except ImportError:
-    QUANTIZATION_AVAILABLE = False
-    print("Warning: BitsAndBytesConfig not available. Quantization will be disabled.")
 
 # Remove actions from transcript
 def remove_paranthesis(text):
@@ -27,30 +20,9 @@ def remove_paranthesis(text):
 
 class CharacterChatBot():
 
-    def _check_quantization_availability(self):
-        """Check if quantization is available by testing bitsandbytes import"""
-        if not torch.cuda.is_available():
-            return False
-        
-        if not QUANTIZATION_AVAILABLE:
-            return False
-        
-        try:
-            import bitsandbytes as bnb
-            # Test if triton is properly available
-            try:
-                from triton.ops.matmul_perf_model import early_config_prune, estimate_matmul_time
-                return True
-            except ImportError:
-                print("Warning: triton.ops not available. Disabling quantization.")
-                return False
-        except ImportError:
-            print("Warning: bitsandbytes not available. Disabling quantization.")
-            return False
-
     def __init__(self,
                  model_path,
-                 data_path="data/naruto.csv",
+                 data_path="/content/data/naruto.csv",
                  huggingface_token = None
                  ):
         
@@ -59,7 +31,6 @@ class CharacterChatBot():
         self.huggingface_token = huggingface_token
         self.base_model_path = "meta-llama/Meta-Llama-3-8B-Instruct"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.use_quantization = self._check_quantization_availability()
 
         if self.huggingface_token is not None:
             huggingface_hub.login(self.huggingface_token)
@@ -74,7 +45,7 @@ class CharacterChatBot():
     
     def chat(self, message, history):
         messages = []
-        # Add the system prompt 
+        # Add the system ptomp 
         messages.append({"role":"system","content":""""Your are Naruto from the anime "Naruto". Your responses should reflect his personality and speech patterns \n"""})
 
         for message_and_respnse in history:
@@ -102,34 +73,17 @@ class CharacterChatBot():
 
 
     def load_model(self, model_path):
-        if self.use_quantization and QUANTIZATION_AVAILABLE:
-            try:
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.float16,
-                    bnb_4bit_use_double_quant=True,  # Better quantization quality
-                )
-                pipeline = transformers.pipeline("text-generation",
-                                                 model = model_path,
-                                                 model_kwargs={"torch_dtype":torch.float16,
-                                                               "quantization_config":bnb_config,
-                                                               },
-                                                 device_map="auto"
-                                                 )
-            except Exception as e:
-                print(f"Quantization failed: {e}. Loading without quantization.")
-                self.use_quantization = False
-                pipeline = transformers.pipeline("text-generation",
-                                                 model = model_path,
-                                                 model_kwargs={"torch_dtype":torch.float16},
-                                                 device_map="auto"
-                                                 )
-        else:
-            pipeline = transformers.pipeline("text-generation",
-                                             model = model_path,
-                                             device_map="auto" if torch.cuda.is_available() else None
-                                             )
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+        pipeline = transformers.pipeline("text-generation",
+                                         model = model_path,
+                                         model_kwargs={"torch_dtype":torch.float16,
+                                                       "quantization_config":bnb_config,
+                                                       }
+                                         )
         return pipeline
     
     def train(self,
@@ -148,40 +102,19 @@ class CharacterChatBot():
               lr_scheduler_type = "constant",
               ):
         
-        # Adjust optimizer if quantization is not available
-        if not self.use_quantization and optim == "paged_adamw_32bit":
-            optim = "adamw_torch"
-            print("Switching to adamw_torch optimizer since quantization is not available.")
-        
-        if self.use_quantization and QUANTIZATION_AVAILABLE:
-            try:
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.float16,
-                    bnb_4bit_use_double_quant=True,  # Better quantization quality
-                )
-                
-                model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path, 
-                                                             quantization_config= bnb_config,
-                                                             trust_remote_code=True)
-            except Exception as e:
-                print(f"Quantization failed during training: {e}. Training without quantization.")
-                self.use_quantization = False
-                if optim == "paged_adamw_32bit":
-                    optim = "adamw_torch"
-                model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path,
-                                                             trust_remote_code=True,
-                                                             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32)
-        else:
-            model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path,
-                                                         trust_remote_code=True,
-                                                         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32)
-        
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+
+        model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path, 
+                                                     quantization_config= bnb_config,
+                                                     trust_remote_code=True)
         model.config.use_cache = False
 
-        tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path)
-        tokenizer.pad_token = tokenizer.eos_token
+        toknizer = AutoTokenizer.from_pretrained(base_model_name_or_path)
+        toknizer.pad_token = toknizer.eos_token
 
         lora_alpha = 16
         lora_dropout = 0.1
@@ -192,74 +125,54 @@ class CharacterChatBot():
             lora_dropout=lora_dropout,
             r=lora_r,
             bias="none",
-            task_type="CAUSAL_LM"
+            task_type="CASUAL_LM"
+        )
+
+        training_arguments = SFTConfig(
+        output_dir=output_dir,
+        per_device_train_batch_size = per_device_train_batch_size,
+        gradient_accumulation_steps = gradient_accumulation_steps,
+        optim = optim,
+        save_steps = save_steps,
+        logging_steps = logging_steps,
+        learning_rate = learning_rate,
+        fp16= True,
+        max_grad_norm = max_grad_norm,
+        max_steps = max_steps,
+        warmup_ratio = warmup_ratio,
+        group_by_length = True,
+        lr_scheduler_type = lr_scheduler_type,
+        report_to = "none"
         )
 
         max_seq_len = 512
 
-        training_arguments = SFTConfig(
-            output_dir=output_dir,
-            per_device_train_batch_size=per_device_train_batch_size,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            optim=optim,
-            save_steps=save_steps,
-            logging_steps=logging_steps,
-            learning_rate=learning_rate,
-            fp16=True if torch.cuda.is_available() else False,
-            max_grad_norm=max_grad_norm,
-            max_steps=max_steps,
-            warmup_ratio=warmup_ratio,
-            group_by_length=True,
-            lr_scheduler_type=lr_scheduler_type,
-            report_to="none",
-            packing=True,
-            dataset_text_field="prompt",
-            max_seq_length=max_seq_len
-        )
-
         trainer = SFTTrainer(
-            model=model,
+            model = model,
             train_dataset=dataset,
             peft_config=peft_config,
-            tokenizer=tokenizer,
-            args=training_arguments,
+            dataset_text_field="prompt",
+            max_seq_length=max_seq_len,
+            tokenizer=toknizer,
+            args = training_arguments,
         )
 
         trainer.train()
 
         # Save model 
         trainer.model.save_pretrained("final_ckpt")
-        tokenizer.save_pretrained("final_ckpt")
+        toknizer.save_pretrained("final_ckpt")
 
         # Flush memory
         del trainer, model
         gc.collect()
 
-        if self.use_quantization and QUANTIZATION_AVAILABLE:
-            try:
-                bnb_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.float16,
-                    bnb_4bit_use_double_quant=True,  # Better quantization quality
-                )
-                
-                base_model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path,
-                                                                  return_dict=True,
-                                                                  quantization_config=bnb_config,
-                                                                  torch_dtype = torch.float16
-                                                                  )
-            except Exception as e:
-                print(f"Quantization failed during model saving: {e}. Using standard loading.")
-                base_model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path,
-                                                                  return_dict=True,
-                                                                  torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-                                                                  )
-        else:
-            base_model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path,
-                                                              return_dict=True,
-                                                              torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-                                                              )
+        base_model = AutoModelForCausalLM.from_pretrained(base_model_name_or_path,
+                                                          return_dict=True,
+                                                          quantization_config=bnb_config,
+                                                          torch_dtype = torch.float16,
+                                                          device_map = self.device
+                                                          )
         
         tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path)
 
@@ -296,6 +209,3 @@ class CharacterChatBot():
         dataset = Dataset.from_pandas(df)
 
         return dataset
-
-
-        
