@@ -15,7 +15,16 @@ class NamedEntityRecognizer:
         pass
 
     def load_model(self):
-        nlp = spacy.load("en_core_web_trf")
+        config = {
+            "components": {
+                "transformer": {
+                    "model": {
+                        "grad_scaler_config": {"init_scale": 2048}
+                    }
+                }
+            }
+        }
+        nlp = spacy.load("en_core_web_trf", config=config)
         return nlp
 
     def get_ners_inference(self,script):
